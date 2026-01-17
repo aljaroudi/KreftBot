@@ -11,6 +11,7 @@ import { getTempFilePath, cleanupFile, createTempDir } from '../utils/fileManage
 import { isValidUrl } from '../utils/validation';
 import { logger } from '../utils/logger';
 import { config } from '../config';
+import { VideoTransformService } from '../services/VideoTransformService';
 
 // Global rate limiter instance
 const rateLimiter = new RateLimiter(config.maxConcurrentDownloads);
@@ -39,11 +40,13 @@ export function registerDownloadHandlers(bot: Bot): void {
   });
 
   // Handle format selection callbacks
-  bot.on('callback_query:data', async (ctx) => {
+  bot.on('callback_query:data', async (ctx, next) => {
     const data = ctx.callbackQuery.data;
 
     if (data.startsWith('download:')) {
       await handleFormatSelection(ctx, data);
+    } else {
+      await next();
     }
   });
 }
@@ -261,10 +264,13 @@ async function downloadContent(
     // Start progress tracking
     await progress.start();
 
+    // Use special format selector for audio extraction (smallest video + best audio)
+    const actualFormatId = formatId === 'extract_audio' ? 'worstvideo+bestaudio' : formatId;
+
     // Spawn yt-dlp with progress reporting
     const args = [
       'yt-dlp',
-      '-f', formatId,
+      '-f', actualFormatId,
       '-o', outputTemplate,
       '--newline',
       '--progress',
@@ -367,6 +373,29 @@ async function downloadContent(
 
     // Mark as complete
     await progress.complete();
+
+    // Handle audio extraction if formatId is 'extract_audio'
+    if (formatId === 'extract_audio') {
+      logger.info({ downloadedFile, userId }, 'Extracting audio from video');
+
+      try {
+        const videoService = new VideoTransformService();
+        const audioPath = await videoService.extractAudio(downloadedFile, 'mp3');
+
+        // Send audio file to user
+        logger.info({ audioPath, userId }, 'Sending extracted audio to user');
+        await ctx.replyWithAudio(new InputFile(audioPath));
+
+        // Cleanup both video and audio files
+        await cleanupFile(downloadedFile);
+        await cleanupFile(audioPath);
+      } catch (error) {
+        logger.error({ error, downloadedFile }, 'Failed to extract audio');
+        await ctx.reply('❌ Failed to extract audio from video. Please try again.');
+        await cleanupFile(downloadedFile);
+      }
+      return;
+    }
 
     // Send file to user
     logger.info({ downloadedFile, userId }, 'Sending file to user');
