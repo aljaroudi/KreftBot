@@ -23,3 +23,14 @@ export interface ContentInfo {
   uploader?: string;
   url: string;
 }
+
+export interface VideoInfo {
+  duration: number;        // in seconds
+  fileSize: number;        // in bytes
+  width: number;
+  height: number;
+  codec: string;
+  bitrate: number;         // in kbps
+  audioBitrate: number;    // in kbps
+  hasAudio: boolean;
+}
