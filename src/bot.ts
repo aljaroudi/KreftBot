@@ -1,9 +1,13 @@
 import { Bot } from 'grammy';
 import { config } from './config';
 import logger from './utils/logger';
+import { registerDownloadHandlers } from './handlers/downloadHandler';
 
 // Create bot instance
 const bot = new Bot(config.botToken);
+
+// Register download handlers
+registerDownloadHandlers(bot);
 
 // Command: /start
 bot.command('start', async (ctx) => {
