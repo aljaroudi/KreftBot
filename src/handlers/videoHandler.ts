@@ -1,4 +1,4 @@
-import { Bot, Context, InlineKeyboard } from 'grammy';
+import { Bot, Context, InlineKeyboard, InputFile } from 'grammy';
 import { hydrateFiles } from '@grammyjs/files';
 import { VideoTransformService } from '../services/VideoTransformService';
 import { logger } from '../utils/logger';
@@ -21,7 +21,14 @@ export function registerVideoHandlers(bot: Bot): void {
   bot.on('message:video', handleVideoUpload);
 
   // Handle callback queries for transformations
-  bot.on('callback_query:data', handleCallbackQuery);
+  bot.on('callback_query:data', async (ctx, next) => {
+    const data = ctx.callbackQuery?.data;
+    if (data?.startsWith('video:')) {
+      await handleCallbackQuery(ctx);
+    } else {
+      await next();
+    }
+  });
 
   // Handle custom size input
   bot.on('message:text', handleCustomSizeInput);
@@ -71,13 +78,21 @@ async function handleVideoUpload(ctx: Context): Promise<void> {
       const minutes = Math.floor(duration / 60);
       const seconds = duration % 60;
 
+      // Estimate resolutions for optimization options
+      const [res10MB, res5MB] = await Promise.all([
+        videoService.estimateOptimizedResolution(videoPath, 10).catch(() => videoInfo.height),
+        videoService.estimateOptimizedResolution(videoPath, 5).catch(() => videoInfo.height),
+      ]);
+
       // Build transformation options keyboard
       const keyboard = new InlineKeyboard()
-        .text('🎵 Extract Audio (MP3)', `video:extract_audio:${videoPath}`)
+        .text(`🎬 Best quality, ${videoInfo.height}p - ${fileSizeMB.toFixed(1)}MB`, `video:best:${videoPath}`)
         .row()
-        .text('📉 Optimize to ~10MB', `video:optimize:10:${videoPath}`)
+        .text(`📉 ${res10MB}p - 10MB`, `video:optimize:10:${videoPath}`)
         .row()
-        .text('📉 Optimize to ~5MB', `video:optimize:5:${videoPath}`)
+        .text(`📉 ${res5MB}p - 5MB`, `video:optimize:5:${videoPath}`)
+        .row()
+        .text('🎵 Audio only', `video:extract_audio:${videoPath}`)
         .row()
         .text('📉 Custom Size...', `video:custom:${videoPath}`);
 
@@ -129,7 +144,10 @@ async function handleCallbackQuery(ctx: Context): Promise<void> {
 
     logger.info({ action, videoPath, userId: ctx.from?.id }, 'Processing video transformation');
 
-    if (action === 'extract_audio') {
+    if (action === 'best') {
+      // Send original video without optimization
+      await handleSendBestQuality(ctx, videoPath);
+    } else if (action === 'extract_audio') {
       await handleExtractAudio(ctx, videoPath);
     } else if (action === 'optimize') {
       const targetSizeMB = parseInt(parts[2]);
@@ -140,6 +158,37 @@ async function handleCallbackQuery(ctx: Context): Promise<void> {
   } catch (error) {
     logger.error({ error }, 'Error in callback query handler');
     await ctx.reply('❌ An error occurred while processing your request.');
+  }
+}
+
+/**
+ * Handle sending best quality (original video)
+ */
+async function handleSendBestQuality(ctx: Context, videoPath: string): Promise<void> {
+  const statusMsg = await ctx.reply('📤 Sending video...');
+
+  try {
+    // Send original video
+    await ctx.replyWithVideo(new InputFile(videoPath), {
+      caption: '✅ Best quality video',
+    });
+
+    await ctx.api.editMessageText(
+      statusMsg.chat.id,
+      statusMsg.message_id,
+      '✅ Video sent!'
+    );
+
+    // Cleanup
+    await cleanupFile(videoPath);
+  } catch (error: any) {
+    logger.error({ error, videoPath }, 'Failed to send video');
+    await ctx.api.editMessageText(
+      statusMsg.chat.id,
+      statusMsg.message_id,
+      `❌ Failed to send video: ${error.message}`
+    );
+    await cleanupFile(videoPath);
   }
 }
 
@@ -159,7 +208,7 @@ async function handleExtractAudio(ctx: Context, videoPath: string): Promise<void
     );
 
     // Send audio file
-    await ctx.replyWithAudio(new URL(`file://${audioPath}`));
+    await ctx.replyWithAudio(new InputFile(audioPath));
 
     await ctx.api.editMessageText(
       statusMsg.chat.id,
@@ -225,7 +274,7 @@ async function handleOptimizeVideo(
     );
 
     // Send optimized video
-    await ctx.replyWithVideo(new URL(`file://${outputPath}`));
+    await ctx.replyWithVideo(new InputFile(outputPath));
 
     await ctx.api.editMessageText(
       statusMsg.chat.id,

@@ -1,6 +1,8 @@
 import sharp from 'sharp';
-import { removeBackground } from '@imgly/background-removal';
-import { stat } from 'fs/promises';
+import { removeBackground } from '@imgly/background-removal-node';
+import { stat, readFile } from 'fs/promises';
+import { pathToFileURL } from 'node:url';
+import { join } from 'node:path';
 import { ImageInfo } from '../types';
 import { logger } from '../utils/logger';
 import { getTempFilePath, cleanupFile, createTempDir } from '../utils/fileManager';
@@ -16,9 +18,32 @@ export class ImageTransformService {
 
       logger.info({ imagePath, outputPath }, 'Removing background from image');
 
-      // Load and process image
-      const blob = await removeBackground(imagePath);
-      const arrayBuffer = await blob.arrayBuffer();
+      // Read image file into a Buffer
+      const imageBuffer = await readFile(imagePath);
+      
+      // Determine file extension and MIME type
+      const ext = imagePath.split('.').pop()?.toLowerCase() || 'jpg';
+      const mimeType = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`;
+      
+      // Create Blob from Buffer (required by @imgly/background-removal-node)
+      const inputBlob = new Blob([imageBuffer], { type: mimeType });
+
+      // Configure publicPath for model files
+      const distDir = join(process.cwd(), 'node_modules', '@imgly', 'background-removal-node', 'dist');
+      const publicPath = pathToFileURL(distDir).toString() + '/';
+
+      const config = {
+        publicPath,
+        output: {
+          format: 'image/png', // PNG for transparency
+        },
+      };
+
+      // Remove background
+      const resultBlob = await removeBackground(inputBlob, config);
+
+      // Convert Blob to Buffer
+      const arrayBuffer = await resultBlob.arrayBuffer();
       const buffer = Buffer.from(arrayBuffer);
 
       // Save as PNG to preserve transparency
@@ -31,6 +56,72 @@ export class ImageTransformService {
     } catch (error) {
       logger.error({ error, imagePath }, 'Failed to remove background');
       throw new Error('Failed to remove background from image');
+    }
+  }
+
+  /**
+   * Estimate the file size after optimization without saving the file
+   */
+  async estimateOptimizedSize(
+    imagePath: string,
+    quality: 'high' | 'medium' | 'low'
+  ): Promise<number> {
+    try {
+      await createTempDir();
+      const imageInfo = await this.getImageInfo(imagePath);
+      const tempPath = getTempFilePath(`estimate_${quality}.${imageInfo.format}`);
+
+      logger.info({ imagePath, quality, format: imageInfo.format }, 'Estimating optimized size');
+
+      let sharpInstance = sharp(imagePath);
+
+      // Apply quality presets based on format
+      switch (quality) {
+        case 'high':
+          if (imageInfo.format === 'jpeg' || imageInfo.format === 'jpg') {
+            sharpInstance = sharpInstance.jpeg({ quality: 90, progressive: true });
+          } else if (imageInfo.format === 'png') {
+            sharpInstance = sharpInstance.png({ compressionLevel: 6, quality: 90 });
+          } else if (imageInfo.format === 'webp') {
+            sharpInstance = sharpInstance.webp({ quality: 90, effort: 6 });
+          }
+          break;
+
+        case 'medium':
+          if (imageInfo.format === 'jpeg' || imageInfo.format === 'jpg') {
+            sharpInstance = sharpInstance.jpeg({ quality: 75, progressive: true });
+          } else if (imageInfo.format === 'png') {
+            sharpInstance = sharpInstance.png({ compressionLevel: 8, quality: 75 });
+          } else if (imageInfo.format === 'webp') {
+            sharpInstance = sharpInstance.webp({ quality: 75, effort: 6 });
+          }
+          break;
+
+        case 'low':
+          if (imageInfo.format === 'jpeg' || imageInfo.format === 'jpg') {
+            sharpInstance = sharpInstance.jpeg({ quality: 55, progressive: true });
+          } else if (imageInfo.format === 'png') {
+            sharpInstance = sharpInstance.png({ compressionLevel: 9, quality: 55 });
+          } else if (imageInfo.format === 'webp') {
+            sharpInstance = sharpInstance.webp({ quality: 55, effort: 6 });
+          }
+          break;
+      }
+
+      await sharpInstance.toFile(tempPath);
+      
+      // Get file size
+      const fileStat = await stat(tempPath);
+      const fileSize = fileStat.size;
+
+      // Cleanup temp file
+      await cleanupFile(tempPath);
+
+      logger.info({ fileSize, quality }, 'Estimated optimized size');
+      return fileSize;
+    } catch (error) {
+      logger.error({ error, imagePath, quality }, 'Failed to estimate optimized size');
+      throw new Error('Failed to estimate optimized size');
     }
   }
 

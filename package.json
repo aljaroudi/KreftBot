@@ -7,12 +7,18 @@
     "dev": "bun --watch src/bot.ts",
     "start": "bun run src/bot.ts"
   },
-  "keywords": ["telegram", "bot", "media", "download", "transform"],
+  "keywords": [
+    "telegram",
+    "bot",
+    "media",
+    "download",
+    "transform"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
     "@grammyjs/files": "^1.1.1",
-    "@imgly/background-removal": "^1.7.0",
+    "@imgly/background-removal-node": "^1.4.5",
     "dotenv": "^16.4.1",
     "grammy": "^1.21.1",
     "pino": "^8.17.2",
