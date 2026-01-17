@@ -1,16 +1,16 @@
-import { Bot, Context, InlineKeyboard } from 'grammy';
+import { Bot, Context, InlineKeyboard, InputFile } from 'grammy';
 import { hydrateFiles } from '@grammyjs/files';
 import { ImageTransformService } from '../services/ImageTransformService';
 import { logger } from '../utils/logger';
 import { createTempDir, getTempFilePath, cleanupFile } from '../utils/fileManager';
 import { writeFile } from 'fs/promises';
+import { getFileCache } from '../utils/fileCache';
 
 const imageService = new ImageTransformService();
 
 // Supported image formats
 const SUPPORTED_FORMATS = ['image/jpeg', 'image/png', 'image/webp'];
 const MAX_IMAGE_SIZE_MB = 20;
-const TELEGRAM_PHOTO_LIMIT_MB = 10;
 
 /**
  * Register image transformation handlers
@@ -26,7 +26,14 @@ export function registerImageHandlers(bot: Bot): void {
   bot.on('message:document', handleDocumentUpload);
 
   // Handle callback queries for transformations
-  bot.on('callback_query:data', handleCallbackQuery);
+  bot.on('callback_query:data', async (ctx, next) => {
+    const data = ctx.callbackQuery?.data;
+    if (data?.startsWith('image:')) {
+      await handleCallbackQuery(ctx);
+    } else {
+      await next();
+    }
+  });
 
   logger.info('Image handlers registered');
 }
@@ -113,17 +120,33 @@ async function processImageUpload(ctx: Context, fileId: string): Promise<void> {
     const imageInfo = await imageService.getImageInfo(imagePath);
     const fileSizeMB = imageInfo.fileSize / (1024 * 1024);
 
-    // Build transformation options keyboard
+    // Store file path in cache and get short ID
+    const userId = ctx.from?.id || 0;
+    const fileCache = getFileCache();
+    const cacheId = fileCache.set(imagePath, userId);
+
+    // Estimate optimization sizes
+    const [highSize, mediumSize, lowSize] = await Promise.all([
+      imageService.estimateOptimizedSize(imagePath, 'high'),
+      imageService.estimateOptimizedSize(imagePath, 'medium'),
+      imageService.estimateOptimizedSize(imagePath, 'low'),
+    ]);
+
+    const highSizeMB = (highSize / (1024 * 1024)).toFixed(1);
+    const mediumSizeMB = (mediumSize / (1024 * 1024)).toFixed(1);
+    const lowSizeMB = (lowSize / (1024 * 1024)).toFixed(1);
+
+    // Build transformation options keyboard with short IDs
     const keyboard = new InlineKeyboard()
-      .text('🖼️ Remove Background', `image:remove_bg:${imagePath}`)
+      .text('🖼️ Remove Background', `image:remove_bg:${cacheId}`)
       .row()
-      .text('📉 Optimize (High Quality)', `image:optimize:high:${imagePath}`)
+      .text(`📉 Optimize (~${highSizeMB}MB)`, `image:optimize:high:${cacheId}`)
       .row()
-      .text('📉 Optimize (Medium Quality)', `image:optimize:medium:${imagePath}`)
+      .text(`📉 Optimize (~${mediumSizeMB}MB)`, `image:optimize:medium:${cacheId}`)
       .row()
-      .text('📉 Optimize (Small Size)', `image:optimize:low:${imagePath}`)
+      .text(`📉 Optimize (~${lowSizeMB}MB)`, `image:optimize:low:${cacheId}`)
       .row()
-      .text('🔄 Convert to WebP', `image:convert:webp:${imagePath}`);
+      .text('🔄 Convert to WebP', `image:convert:webp:${cacheId}`);
 
     const infoMessage = `
 🖼️ Image Info:
@@ -165,7 +188,18 @@ async function handleCallbackQuery(ctx: Context): Promise<void> {
 
     const parts = data.split(':');
     const action = parts[1];
-    const imagePath = parts[parts.length - 1];
+    const cacheId = parts[parts.length - 1];
+
+    // Retrieve file path from cache
+    const userId = ctx.from?.id || 0;
+    const fileCache = getFileCache();
+    const imagePath = fileCache.get(cacheId, userId);
+
+    if (!imagePath) {
+      await ctx.reply('❌ File not found or expired. Please upload the image again.');
+      logger.warn({ cacheId, userId }, 'File not found in cache');
+      return;
+    }
 
     logger.info({ action, imagePath, userId: ctx.from?.id }, 'Processing image transformation');
 
@@ -205,16 +239,10 @@ async function handleRemoveBackground(ctx: Context, imagePath: string): Promise<
     const originalSizeMB = originalInfo.fileSize / (1024 * 1024);
     const outputSizeMB = outputInfo.fileSize / (1024 * 1024);
 
-    // Send as photo or document depending on size
-    if (outputSizeMB > TELEGRAM_PHOTO_LIMIT_MB) {
-      await ctx.replyWithDocument(new URL(`file://${outputPath}`), {
-        caption: `✅ Background removed!\n📦 Original: ${originalSizeMB.toFixed(2)}MB → Result: ${outputSizeMB.toFixed(2)}MB`,
-      });
-    } else {
-      await ctx.replyWithPhoto(new URL(`file://${outputPath}`), {
-        caption: `✅ Background removed!\n📦 Original: ${originalSizeMB.toFixed(2)}MB → Result: ${outputSizeMB.toFixed(2)}MB`,
-      });
-    }
+    // Always send as document to preserve quality
+    await ctx.replyWithDocument(new InputFile(outputPath), {
+      caption: `✅ Background removed!\n📦 Original: ${originalSizeMB.toFixed(2)}MB → Result: ${outputSizeMB.toFixed(2)}MB`,
+    });
 
     await ctx.api.editMessageText(
       statusMsg.chat.id,
@@ -222,7 +250,7 @@ async function handleRemoveBackground(ctx: Context, imagePath: string): Promise<
       '✅ Background removal complete!'
     );
 
-    // Cleanup
+    // Cleanup files
     await cleanupFile(imagePath);
     await cleanupFile(outputPath);
   } catch (error: any) {
@@ -274,12 +302,8 @@ async function handleOptimizeImage(
 
     const caption = `✅ Optimized! ${originalSizeMB.toFixed(2)}MB → ${outputSizeMB.toFixed(2)}MB (${reduction}% smaller)`;
 
-    // Send as photo or document depending on size
-    if (outputSizeMB > TELEGRAM_PHOTO_LIMIT_MB) {
-      await ctx.replyWithDocument(new URL(`file://${outputPath}`), { caption });
-    } else {
-      await ctx.replyWithPhoto(new URL(`file://${outputPath}`), { caption });
-    }
+    // Always send as document to preserve quality
+    await ctx.replyWithDocument(new InputFile(outputPath), { caption });
 
     await ctx.api.editMessageText(
       statusMsg.chat.id,
@@ -332,12 +356,8 @@ async function handleConvertFormat(
 
     const caption = `✅ Converted to ${targetFormat.toUpperCase()}! ${originalSizeMB.toFixed(2)}MB → ${outputSizeMB.toFixed(2)}MB (${changeText})`;
 
-    // Send as document for WebP to preserve quality, or as photo for others
-    if (targetFormat === 'webp' || outputSizeMB > TELEGRAM_PHOTO_LIMIT_MB) {
-      await ctx.replyWithDocument(new URL(`file://${outputPath}`), { caption });
-    } else {
-      await ctx.replyWithPhoto(new URL(`file://${outputPath}`), { caption });
-    }
+    // Always send as document to preserve quality
+    await ctx.replyWithDocument(new InputFile(outputPath), { caption });
 
     await ctx.api.editMessageText(
       statusMsg.chat.id,

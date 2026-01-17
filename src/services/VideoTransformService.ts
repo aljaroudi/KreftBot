@@ -108,6 +108,59 @@ export class VideoTransformService {
   }
 
   /**
+   * Estimate the resolution after optimization to target size
+   * Returns the estimated height (e.g., 1080, 720, 480)
+   */
+  async estimateOptimizedResolution(
+    videoPath: string,
+    targetSizeMB: number
+  ): Promise<number> {
+    try {
+      const videoInfo = await this.getVideoInfo(videoPath);
+      const currentSizeMB = videoInfo.fileSize / (1024 * 1024);
+
+      // If target is larger than current, no resolution change needed
+      if (targetSizeMB >= currentSizeMB) {
+        return videoInfo.height;
+      }
+
+      // Calculate compression ratio
+      const compressionRatio = targetSizeMB / currentSizeMB;
+
+      // Estimate resolution based on compression ratio
+      // Since bitrate correlates roughly with pixel count, we can estimate:
+      // new_pixels = old_pixels * sqrt(compressionRatio)
+      const estimatedHeight = Math.round(videoInfo.height * Math.sqrt(compressionRatio));
+
+      // Common video resolutions
+      const commonResolutions = [2160, 1440, 1080, 720, 480, 360, 240];
+
+      // Find the closest common resolution
+      let closestResolution = estimatedHeight;
+      let minDiff = Infinity;
+
+      for (const res of commonResolutions) {
+        const diff = Math.abs(res - estimatedHeight);
+        if (diff < minDiff && res <= videoInfo.height) {
+          minDiff = diff;
+          closestResolution = res;
+        }
+      }
+
+      logger.info({ 
+        originalHeight: videoInfo.height, 
+        targetSizeMB, 
+        estimatedHeight: closestResolution 
+      }, 'Estimated optimized resolution');
+
+      return closestResolution;
+    } catch (error) {
+      logger.error({ error, videoPath, targetSizeMB }, 'Failed to estimate optimized resolution');
+      throw new Error('Failed to estimate optimized resolution');
+    }
+  }
+
+  /**
    * Optimize video to target file size using two-pass encoding
    */
   async optimizeVideo(
