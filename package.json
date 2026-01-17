@@ -1,0 +1,22 @@
+{
+  "name": "kreftbot",
+  "version": "1.0.0",
+  "description": "Telegram bot for downloading and transforming media content from various platforms",
+  "main": "src/bot.ts",
+  "scripts": {
+    "dev": "bun --watch src/bot.ts",
+    "start": "bun run src/bot.ts"
+  },
+  "keywords": ["telegram", "bot", "media", "download", "transform"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "grammy": "^1.21.1",
+    "@grammyjs/files": "^1.1.1",
+    "dotenv": "^16.4.1",
+    "pino": "^8.17.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.5"
+  }
+}
