@@ -2,6 +2,8 @@ import { spawn } from 'bun';
 import { Platform, Format, ContentInfo } from '../types';
 import { isValidUrl } from '../utils/validation';
 import { logger } from '../utils/logger';
+import { withRetry, isRetryableError, BotError, ErrorType, parseFileSize } from '../utils/errors';
+import { config } from '../config';
 
 export class DownloadService {
   private static readonly PLATFORM_PATTERNS: Record<string, RegExp[]> = {
@@ -42,61 +44,104 @@ export class DownloadService {
   }
 
   /**
-   * Fetches available formats for a URL using yt-dlp
+   * Fetches available formats for a URL using yt-dlp with retry
    */
   async fetchAvailableFormats(url: string): Promise<Format[]> {
     logger.info({ url }, 'Fetching available formats');
 
-    try {
-      const proc = spawn(['yt-dlp', '-F', url], {
-        stdout: 'pipe',
-        stderr: 'pipe',
-      });
+    return withRetry(
+      async () => {
+        const proc = spawn(['yt-dlp', '-F', url], {
+          stdout: 'pipe',
+          stderr: 'pipe',
+        });
 
-      const stdout = await new Response(proc.stdout).text();
-      const stderr = await new Response(proc.stderr).text();
-      const exitCode = await proc.exited;
+        const stdout = await new Response(proc.stdout).text();
+        const stderr = await new Response(proc.stderr).text();
+        const exitCode = await proc.exited;
 
-      if (exitCode !== 0) {
-        logger.error({ stderr, exitCode }, 'yt-dlp format fetch failed');
-        throw new Error(`Failed to fetch formats: ${stderr}`);
+        if (exitCode !== 0) {
+          logger.error({ stderr, exitCode }, 'yt-dlp format fetch failed');
+          const error = new Error(`Failed to fetch formats: ${stderr}`);
+
+          // Only retry if error is network-related
+          if (!isRetryableError(error)) {
+            throw new BotError(ErrorType.DOWNLOAD_FAILED, error.message, { url }, error);
+          }
+          throw error;
+        }
+
+        logger.debug({ output: stdout }, 'yt-dlp format output');
+        return this.parseFormats(stdout);
+      },
+      { maxAttempts: 2 }, // Only retry once for format fetching
+      (attempt, error) => {
+        logger.warn({ attempt, error, url }, 'Retrying format fetch');
       }
+    );
+  }
 
-      logger.debug({ output: stdout }, 'yt-dlp format output');
+  /**
+   * Validate file size before download
+   */
+  validateFileSize(fileSize: number | undefined): void {
+    if (!fileSize) {
+      // Can't validate unknown file size
+      return;
+    }
 
-      return this.parseFormats(stdout);
-    } catch (error) {
-      logger.error({ error, url }, 'Error fetching formats');
-      throw new Error(`Failed to fetch formats: ${error}`);
+    const maxSizeBytes = config.maxFileSizeMB * 1024 * 1024;
+    const fileSizeMB = Math.round((fileSize / (1024 * 1024)) * 10) / 10;
+
+    if (fileSize > maxSizeBytes) {
+      throw new BotError(
+        ErrorType.FILE_TOO_LARGE,
+        'File size exceeds limit',
+        { size: fileSizeMB, limit: config.maxFileSizeMB }
+      );
     }
   }
 
   /**
-   * Downloads content using yt-dlp
+   * Downloads content using yt-dlp with retry and size validation
    */
-  async downloadContent(url: string, formatId: string, outputPath: string): Promise<string> {
-    logger.info({ url, formatId, outputPath }, 'Starting download');
+  async downloadContent(url: string, formatId: string, outputPath: string, expectedSize?: number): Promise<string> {
+    logger.info({ url, formatId, outputPath, expectedSize }, 'Starting download');
 
-    try {
-      const proc = spawn(['yt-dlp', '-f', formatId, '-o', outputPath, url], {
-        stdout: 'pipe',
-        stderr: 'pipe',
-      });
-
-      const stderr = await new Response(proc.stderr).text();
-      const exitCode = await proc.exited;
-
-      if (exitCode !== 0) {
-        logger.error({ stderr, exitCode }, 'yt-dlp download failed');
-        throw new Error(`Download failed: ${stderr}`);
-      }
-
-      logger.info({ outputPath }, 'Download completed');
-      return outputPath;
-    } catch (error) {
-      logger.error({ error, url, formatId }, 'Error downloading content');
-      throw new Error(`Download failed: ${error}`);
+    // Validate file size if known
+    if (expectedSize) {
+      this.validateFileSize(expectedSize);
     }
+
+    return withRetry(
+      async () => {
+        const proc = spawn(['yt-dlp', '-f', formatId, '-o', outputPath, url], {
+          stdout: 'pipe',
+          stderr: 'pipe',
+        });
+
+        const stderr = await new Response(proc.stderr).text();
+        const exitCode = await proc.exited;
+
+        if (exitCode !== 0) {
+          logger.error({ stderr, exitCode }, 'yt-dlp download failed');
+          const error = new Error(`Download failed: ${stderr}`);
+
+          // Check if error is retryable
+          if (!isRetryableError(error)) {
+            throw new BotError(ErrorType.DOWNLOAD_FAILED, error.message, { url, formatId }, error);
+          }
+          throw error;
+        }
+
+        logger.info({ outputPath }, 'Download completed');
+        return outputPath;
+      },
+      { maxAttempts: 3 }, // Retry up to 3 times for downloads
+      (attempt, error) => {
+        logger.warn({ attempt, error, url, formatId }, 'Retrying download');
+      }
+    );
   }
 
   /**
