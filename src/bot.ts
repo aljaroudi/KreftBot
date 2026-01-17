@@ -3,6 +3,7 @@ import { config } from './config';
 import logger from './utils/logger';
 import { registerDownloadHandlers } from './handlers/downloadHandler';
 import { registerVideoHandlers } from './handlers/videoHandler';
+import { registerImageHandlers } from './handlers/imageHandler';
 
 // Create bot instance
 const bot = new Bot(config.botToken);
@@ -10,6 +11,7 @@ const bot = new Bot(config.botToken);
 // Register handlers
 registerDownloadHandlers(bot);
 registerVideoHandlers(bot);
+registerImageHandlers(bot);
 
 // Command: /start
 bot.command('start', async (ctx) => {

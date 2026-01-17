@@ -34,3 +34,12 @@ export interface VideoInfo {
   audioBitrate: number;    // in kbps
   hasAudio: boolean;
 }
+
+export interface ImageInfo {
+  width: number;
+  height: number;
+  format: string;        // 'jpeg', 'png', 'webp', etc.
+  fileSize: number;      // in bytes
+  hasAlpha: boolean;     // transparency channel
+  colorSpace: string;
+}
